@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>影院字幕机 v1.7</title>
+    <title>影院字幕机 v1.9</title>
     <script src="https://cdn.jsdelivr.net/gh/gzuidhof/coi-serviceworker@latest/coi-serviceworker.min.js"></script>
     <style>
         body { margin: 0; padding: 0; background: #000; color: #aaa; font-family: sans-serif; overflow: hidden; }
@@ -12,7 +12,8 @@
         #error-log { 
             position: absolute; top: 0; left: 0; width: 100%; max-height: 50vh; overflow-y: auto; 
             background: rgba(30, 0, 0, 0.9); color: #ff5555; padding: 10px; box-sizing: border-box;
-            font-size: 12px; z-index: 9999; display: none; word-wrap: break-word; user-select: text; -webkit-user-select: text; 
+            font-size: 12px; z-index: 9999; display: none; word-wrap: break-word; user-select: text; -webkit-user-select: text;
+            cursor: pointer;
         }
 
         #canvas { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 10; transition: filter 0.3s; }
@@ -53,7 +54,7 @@
         
         <div id="controls">
             <div class="timeline-container">
-                <span class="version-badge">v1.7 ESM版</span>
+                <span class="version-badge">v1.9 跨域终极版</span>
                 <div class="time-display" id="clock">00:00:00.0</div>
                 <input type="range" id="progress-bar" min="0" max="100" step="0.1" value="0" oninput="seekTime(this.value)">
                 <div class="time-display" id="duration" style="font-size: 14px; width: 60px; text-align: right;">00:00</div>
@@ -99,10 +100,20 @@
         import JASSUB from 'https://cdn.jsdelivr.net/npm/jassub@1.8.6/dist/jassub.es.js';
 
         const errorLogBox = document.getElementById('error-log');
+        
+        errorLogBox.addEventListener('click', function() {
+            this.style.display = 'none';
+            this.innerHTML = '';
+        });
+
         function printError(msg) {
             errorLogBox.style.display = 'block';
-            errorLogBox.innerHTML += `<div>${msg}</div>`;
+            if (!errorLogBox.innerHTML.includes('点击任意位置清空')) {
+                errorLogBox.innerHTML = '<div style="text-align: center; color: #fff; border-bottom: 1px dashed #555; padding-bottom: 5px; margin-bottom: 5px; font-weight: bold;">[点击任意位置清空并关闭面板]</div>' + errorLogBox.innerHTML;
+            }
+            errorLogBox.innerHTML += `<div style="margin-bottom: 4px;">${msg}</div>`;
         }
+        
         window.addEventListener('error', (e) => printError(`[系统报错] ${e.message}`));
         window.addEventListener('unhandledrejection', (e) => printError(`[异步崩溃] ${e.reason}`));
         
@@ -166,7 +177,15 @@
                 durationDisplay.innerText = formatTime(totalDuration, false);
 
                 errorLogBox.style.display = 'block';
-                errorLogBox.innerHTML = '<div style="color: #44ff44;">构建 ESM 渲染管道中...</div>';
+                if (!errorLogBox.innerHTML.includes('点击任意位置清空')) {
+                    errorLogBox.innerHTML = '<div style="text-align: center; color: #fff; border-bottom: 1px dashed #555; padding-bottom: 5px; margin-bottom: 5px; font-weight: bold;">[点击任意位置清空并关闭面板]</div>';
+                }
+                errorLogBox.innerHTML += '<div style="color: #44ff44;">执行 Blob 注入，构建渲染管道中...</div>';
+
+                // 核心修复：用 Blob 和 importScripts 搞个套娃，强行绕过同源策略
+                const workerCode = `importScripts('https://cdn.jsdelivr.net/npm/jassub@1.8.6/dist/jassub-worker.js');`;
+                const workerBlob = new Blob([workerCode], { type: 'text/javascript' });
+                const localWorkerUrl = URL.createObjectURL(workerBlob);
 
                 if (jassub) jassub.destroy();
                 
@@ -174,9 +193,9 @@
                     canvas: canvas,
                     subContent: textContent,
                     subtitleScale: document.getElementById('scale').value,
-                    workerUrl: 'https://cdn.jsdelivr.net/npm/jassub@1.8.6/dist/jassub-worker.js',
+                    workerUrl: localWorkerUrl,
                     wasmUrl: 'https://cdn.jsdelivr.net/npm/jassub@1.8.6/dist/jassub-worker.wasm',
-                    fallbackFont: 'sans-serif' // 增加中日韩兜底字体，防丢字
+                    fallbackFont: 'sans-serif'
                 });
                 
                 resizeCanvas();
@@ -210,7 +229,6 @@
         }
         requestAnimationFrame(tick);
 
-        // 将局部函数挂载到 window 暴露给 HTML 原生控件
         window.togglePlay = function() {
             isPlaying = !isPlaying;
             if (isPlaying) {
