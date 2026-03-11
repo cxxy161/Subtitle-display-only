@@ -3,9 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>影院字幕机 v1.6</title>
+    <title>影院字幕机 v1.7</title>
     <script src="https://cdn.jsdelivr.net/gh/gzuidhof/coi-serviceworker@latest/coi-serviceworker.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/jassub@1.0.6/dist/jassub.umd.js"></script>
     <style>
         body { margin: 0; padding: 0; background: #000; color: #aaa; font-family: sans-serif; overflow: hidden; }
         #app { position: relative; width: 100vw; height: 100vh; display: flex; align-items: center; justify-content: center; }
@@ -54,7 +53,7 @@
         
         <div id="controls">
             <div class="timeline-container">
-                <span class="version-badge">v1.6</span>
+                <span class="version-badge">v1.7 ESM版</span>
                 <div class="time-display" id="clock">00:00:00.0</div>
                 <input type="range" id="progress-bar" min="0" max="100" step="0.1" value="0" oninput="seekTime(this.value)">
                 <div class="time-display" id="duration" style="font-size: 14px; width: 60px; text-align: right;">00:00</div>
@@ -96,7 +95,9 @@
         </div>
     </div>
 
-    <script>
+    <script type="module">
+        import JASSUB from 'https://cdn.jsdelivr.net/npm/jassub@1.8.6/dist/jassub.es.js';
+
         const errorLogBox = document.getElementById('error-log');
         function printError(msg) {
             errorLogBox.style.display = 'block';
@@ -165,7 +166,7 @@
                 durationDisplay.innerText = formatTime(totalDuration, false);
 
                 errorLogBox.style.display = 'block';
-                errorLogBox.innerHTML = '<div style="color: #44ff44;">加载引擎中...</div>';
+                errorLogBox.innerHTML = '<div style="color: #44ff44;">构建 ESM 渲染管道中...</div>';
 
                 if (jassub) jassub.destroy();
                 
@@ -173,8 +174,9 @@
                     canvas: canvas,
                     subContent: textContent,
                     subtitleScale: document.getElementById('scale').value,
-                    workerUrl: 'https://cdn.jsdelivr.net/npm/jassub@1.0.6/dist/jassub-worker.js',
-                    wasmUrl: 'https://cdn.jsdelivr.net/npm/jassub@1.0.6/dist/jassub-worker.wasm'
+                    workerUrl: 'https://cdn.jsdelivr.net/npm/jassub@1.8.6/dist/jassub-worker.js',
+                    wasmUrl: 'https://cdn.jsdelivr.net/npm/jassub@1.8.6/dist/jassub-worker.wasm',
+                    fallbackFont: 'sans-serif' // 增加中日韩兜底字体，防丢字
                 });
                 
                 resizeCanvas();
@@ -208,7 +210,8 @@
         }
         requestAnimationFrame(tick);
 
-        function togglePlay() {
+        // 将局部函数挂载到 window 暴露给 HTML 原生控件
+        window.togglePlay = function() {
             isPlaying = !isPlaying;
             if (isPlaying) {
                 lastRealTime = performance.now();
@@ -218,36 +221,37 @@
                 playBtn.innerText = '▶ 开始同步';
                 playBtn.style.background = '#3a3';
             }
-        }
+        };
 
         progressBar.addEventListener('mousedown', () => isDragging = true);
         progressBar.addEventListener('touchstart', () => isDragging = true);
         
-        function seekTime(val) {
+        window.seekTime = function(val) {
             const targetTime = parseFloat(val);
             baseTime = targetTime - offset;
             updateDisplay(targetTime);
-        }
+        };
 
         progressBar.addEventListener('mouseup', () => { isDragging = false; lastRealTime = performance.now(); });
         progressBar.addEventListener('touchend', () => { isDragging = false; lastRealTime = performance.now(); });
 
-        function adjustOffset(val) {
+        window.adjustOffset = function(val) {
             offset += val;
             document.getElementById('offset-val').innerText = offset.toFixed(1) + 's';
             updateDisplay(baseTime + offset);
-        }
+        };
 
-        function updateScale(val) { if (jassub) jassub.setSubtitleScale(parseFloat(val)); }
-        function updateColor() {
+        window.updateScale = function(val) { if (jassub) jassub.setSubtitleScale(parseFloat(val)); };
+        
+        window.updateColor = function() {
             const brightness = document.getElementById('brightness').value;
             const red = document.getElementById('red-tint').value;
             canvas.style.filter = `brightness(${brightness}) sepia(${red}) hue-rotate(-50deg) saturate(${1 + red * 2})`;
-        }
+        };
 
-        function toggleControls() { controls.classList.toggle('hidden'); }
+        window.toggleControls = function() { controls.classList.toggle('hidden'); };
 
-        async function enterCinemaMode() {
+        window.enterCinemaMode = async function() {
             try {
                 if (document.documentElement.requestFullscreen) await document.documentElement.requestFullscreen();
                 if (screen.orientation && screen.orientation.lock) await screen.orientation.lock('landscape');
@@ -255,7 +259,7 @@
                 controls.classList.add('hidden');
                 resizeCanvas();
             } catch (err) { printError(`[环境受限] ${err.message}`); }
-        }
+        };
     </script>
 </body>
 </html>
