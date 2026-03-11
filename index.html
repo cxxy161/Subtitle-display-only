@@ -1,16 +1,22 @@
 <!DOCTYPE html>
 <html lang="zh">
-    <script src="https://cdn.jsdelivr.net/gh/gzuidhof/coi-serviceworker@latest/coi-serviceworker.min.js"></script>
-
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>影院专属字幕机 - 时间轴版</title>
-    <script src="https://unpkg.com/jassub/dist/jassub.js"></script>
+    <title>影院字幕机 v1.2</title>
+    <script src="https://cdn.jsdelivr.net/gh/gzuidhof/coi-serviceworker@latest/coi-serviceworker.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jassub@1.0.6/dist/jassub.min.js"></script>
     <style>
         body { margin: 0; padding: 0; background: #000; color: #aaa; font-family: sans-serif; overflow: hidden; }
         #app { position: relative; width: 100vw; height: 100vh; display: flex; align-items: center; justify-content: center; }
         
+        /* 报错输出层，层级最高，允许选中复制 */
+        #error-log { 
+            position: absolute; top: 0; left: 0; width: 100%; max-height: 50vh; overflow-y: auto; 
+            background: rgba(30, 0, 0, 0.9); color: #ff5555; padding: 10px; box-sizing: border-box;
+            font-size: 12px; z-index: 9999; display: none; word-wrap: break-word; user-select: text; -webkit-user-select: text; 
+        }
+
         #canvas { position: absolute; width: 100%; height: 100%; pointer-events: none; z-index: 10; transition: filter 0.3s; }
         #touch-mask { position: absolute; width: 100%; height: 100%; z-index: 20; }
         
@@ -18,8 +24,7 @@
             position: absolute; bottom: 0; width: 100%; background: rgba(0, 0, 0, 0.85);
             padding: 15px; box-sizing: border-box; z-index: 30;
             display: flex; flex-direction: column; gap: 12px;
-            transition: transform 0.3s ease;
-            user-select: none;
+            transition: transform 0.3s ease; user-select: none;
         }
         .hidden { transform: translateY(100%); }
         
@@ -32,9 +37,9 @@
         input[type="file"] { display: none; }
         
         .time-display { font-size: 20px; font-weight: bold; color: #fff; font-variant-numeric: tabular-nums; width: 130px;}
+        .version-badge { font-size: 12px; color: #666; position: absolute; top: -15px; left: 0; }
         
-        /* 时间轴滑块专属样式 */
-        .timeline-container { display: flex; align-items: center; gap: 10px; width: 100%; }
+        .timeline-container { display: flex; align-items: center; gap: 10px; width: 100%; position: relative; }
         #progress-bar { flex-grow: 1; height: 6px; -webkit-appearance: none; background: #444; border-radius: 3px; outline: none; }
         #progress-bar::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%; background: #fff; cursor: pointer; }
         
@@ -43,12 +48,14 @@
     </style>
 </head>
 <body>
+    <div id="error-log"></div>
     <div id="app">
         <canvas id="canvas"></canvas>
         <div id="touch-mask" onclick="toggleControls()"></div>
         
         <div id="controls">
             <div class="timeline-container">
+                <span class="version-badge">v1.2</span>
                 <div class="time-display" id="clock">00:00:00.0</div>
                 <input type="range" id="progress-bar" min="0" max="100" step="0.1" value="0" oninput="seekTime(this.value)">
                 <div class="time-display" id="duration" style="font-size: 14px; width: 60px; text-align: right;">00:00</div>
@@ -91,13 +98,28 @@
     </div>
 
     <script>
+        // --- 暴力劫持报错日志 ---
+        const errorLogBox = document.getElementById('error-log');
+        function printError(msg) {
+            errorLogBox.style.display = 'block';
+            errorLogBox.innerHTML += `<div>${msg}</div>`;
+        }
+        window.addEventListener('error', (e) => printError(`[系统报错] ${e.message} (${e.filename}:${e.lineno})`));
+        window.addEventListener('unhandledrejection', (e) => printError(`[异步崩溃] ${e.reason}`));
+        const oldErr = console.error;
+        console.error = function(...args) {
+            printError(`[引擎报错] ${args.join(' ')}`);
+            oldErr.apply(console, args);
+        };
+
+        // --- 核心业务逻辑 ---
         let jassub = null;
         let isPlaying = false;
         let baseTime = 0; 
         let offset = 0;   
         let lastRealTime = 0; 
         let totalDuration = 0;
-        let isDragging = false; // 判断是否正在拖拽进度条
+        let isDragging = false; 
         let wakeLock = null;
 
         const canvas = document.getElementById('canvas');
@@ -107,17 +129,15 @@
         const progressBar = document.getElementById('progress-bar');
         const playBtn = document.getElementById('play-btn');
 
-        // 正则提取 ASS 最大时间
         function parseAssDuration(text) {
             let max = 0;
-            // 匹配 ASS 格式时间 H:MM:SS.CC
             const regex = /Dialogue: [^,]*,(\d+):(\d{2}):(\d{2})\.(\d{2})/g;
             let match;
             while ((match = regex.exec(text)) !== null) {
                 const secs = parseInt(match[1])*3600 + parseInt(match[2])*60 + parseInt(match[3]) + parseInt(match[4])/100;
                 if (secs > max) max = secs;
             }
-            return max > 0 ? max : 7200; // 默认给2小时兜底
+            return max > 0 ? max : 7200; 
         }
 
         function formatTime(secs, showMs = true) {
@@ -129,45 +149,46 @@
             return `${h}:${m}:${s}.${ms}`;
         }
 
-        // 监听文件导入
         document.getElementById('ass-file').addEventListener('change', (e) => {
             const file = e.target.files[0];
             if (!file) return;
             const reader = new FileReader();
             reader.onload = (event) => {
-                const assContent = event.target.result;
-                
-                // 解析时间轴总长
-                totalDuration = parseAssDuration(assContent);
-                progressBar.max = totalDuration;
-                durationDisplay.innerText = formatTime(totalDuration, false);
+                try {
+                    const assContent = event.target.result;
+                    totalDuration = parseAssDuration(assContent);
+                    progressBar.max = totalDuration;
+                    durationDisplay.innerText = formatTime(totalDuration, false);
 
-                if (jassub) jassub.destroy();
-                // 强制指定公网 CDN 的 Worker 和 WASM 路径，绕过本地 file:// 协议跨域限制
-                jassub = new JASSUB({
-                    canvas: canvas,
-                    subContent: assContent,
-                    subtitleScale: document.getElementById('scale').value,
-                    workerUrl: 'https://unpkg.com/jassub/dist/jassub.worker.js',
-                    wasmUrl: 'https://unpkg.com/jassub/dist/jassub.wasm'
-                });
-                
-                baseTime = 0;
-                offset = 0;
-                progressBar.value = 0;
-                updateDisplay(0);
+                    if (jassub) jassub.destroy();
+                    
+                    // 强制指定公共 CDN 绝对路径
+                    jassub = new JASSUB({
+                        canvas: canvas,
+                        subContent: assContent,
+                        subtitleScale: document.getElementById('scale').value,
+                        workerUrl: 'https://cdn.jsdelivr.net/npm/jassub@1.0.6/dist/jassub.worker.min.js',
+                        wasmUrl: 'https://cdn.jsdelivr.net/npm/jassub@1.0.6/dist/jassub.wasm'
+                    });
+                    
+                    baseTime = 0;
+                    offset = 0;
+                    progressBar.value = 0;
+                    updateDisplay(0);
+                    errorLogBox.style.display = 'none'; // 载入成功清空报错面板
+                } catch (err) {
+                    printError(`[初始化失败] ${err.message}`);
+                }
             };
             reader.readAsText(file);
         });
 
-        // 时间更新与渲染核心
         function updateDisplay(renderTime) {
             if (jassub) jassub.setCurrentTime(Math.max(0, renderTime));
             clockDisplay.innerText = formatTime(Math.max(0, renderTime));
             if (!isDragging) progressBar.value = Math.max(0, renderTime);
         }
 
-        // 核心循环
         function tick() {
             if (isPlaying && !isDragging) {
                 const now = performance.now();
@@ -180,7 +201,6 @@
         }
         requestAnimationFrame(tick);
 
-        // 播放暂停
         function togglePlay() {
             isPlaying = !isPlaying;
             if (isPlaying) {
@@ -193,27 +213,24 @@
             }
         }
 
-        // 拖拽进度条核心逻辑
         progressBar.addEventListener('mousedown', () => isDragging = true);
         progressBar.addEventListener('touchstart', () => isDragging = true);
         
         function seekTime(val) {
             const targetTime = parseFloat(val);
-            baseTime = targetTime - offset; // 反推 baseTime，保证 renderTime = targetTime
+            baseTime = targetTime - offset;
             updateDisplay(targetTime);
         }
 
         progressBar.addEventListener('mouseup', () => { isDragging = false; lastRealTime = performance.now(); });
         progressBar.addEventListener('touchend', () => { isDragging = false; lastRealTime = performance.now(); });
 
-        // 偏移调整
         function adjustOffset(val) {
             offset += val;
             document.getElementById('offset-val').innerText = offset.toFixed(1) + 's';
             updateDisplay(baseTime + offset);
         }
 
-        // UI视觉控制
         function updateScale(val) { if (jassub) jassub.setSubtitleScale(parseFloat(val)); }
         function updateColor() {
             const brightness = document.getElementById('brightness').value;
@@ -229,7 +246,7 @@
                 if (screen.orientation && screen.orientation.lock) await screen.orientation.lock('landscape');
                 if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen');
                 controls.classList.add('hidden');
-            } catch (err) { console.log('当前环境不支持部分全屏或常亮API'); }
+            } catch (err) { printError(`[环境受限] ${err.message}`); }
         }
     </script>
 </body>
