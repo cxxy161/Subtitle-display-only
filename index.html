@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>影院字幕机 v1.9</title>
+    <title>影院字幕机 v1.10</title>
     <script src="https://cdn.jsdelivr.net/gh/gzuidhof/coi-serviceworker@latest/coi-serviceworker.min.js"></script>
     <style>
         body { margin: 0; padding: 0; background: #000; color: #aaa; font-family: sans-serif; overflow: hidden; }
@@ -49,12 +49,13 @@
 <body>
     <div id="error-log"></div>
     <div id="app">
+        <video id="dummy-video" style="display: none;"></video>
         <canvas id="canvas"></canvas>
         <div id="touch-mask" onclick="toggleControls()"></div>
         
         <div id="controls">
             <div class="timeline-container">
-                <span class="version-badge">v1.9 跨域终极版</span>
+                <span class="version-badge">v1.10 稳定版</span>
                 <div class="time-display" id="clock">00:00:00.0</div>
                 <input type="range" id="progress-bar" min="0" max="100" step="0.1" value="0" oninput="seekTime(this.value)">
                 <div class="time-display" id="duration" style="font-size: 14px; width: 60px; text-align: right;">00:00</div>
@@ -131,6 +132,7 @@
         let isDragging = false; 
 
         const canvas = document.getElementById('canvas');
+        const dummyVideo = document.getElementById('dummy-video');
         const controls = document.getElementById('controls');
         const clockDisplay = document.getElementById('clock');
         const durationDisplay = document.getElementById('duration');
@@ -180,9 +182,8 @@
                 if (!errorLogBox.innerHTML.includes('点击任意位置清空')) {
                     errorLogBox.innerHTML = '<div style="text-align: center; color: #fff; border-bottom: 1px dashed #555; padding-bottom: 5px; margin-bottom: 5px; font-weight: bold;">[点击任意位置清空并关闭面板]</div>';
                 }
-                errorLogBox.innerHTML += '<div style="color: #44ff44;">执行 Blob 注入，构建渲染管道中...</div>';
+                errorLogBox.innerHTML += '<div style="color: #44ff44;">执行 Blob 注入，加载渲染管道...</div>';
 
-                // 核心修复：用 Blob 和 importScripts 搞个套娃，强行绕过同源策略
                 const workerCode = `importScripts('https://cdn.jsdelivr.net/npm/jassub@1.8.6/dist/jassub-worker.js');`;
                 const workerBlob = new Blob([workerCode], { type: 'text/javascript' });
                 const localWorkerUrl = URL.createObjectURL(workerBlob);
@@ -190,6 +191,7 @@
                 if (jassub) jassub.destroy();
                 
                 jassub = new JASSUB({
+                    video: dummyVideo, // 把假视频传进去，满足引擎的强迫症
                     canvas: canvas,
                     subContent: textContent,
                     subtitleScale: document.getElementById('scale').value,
