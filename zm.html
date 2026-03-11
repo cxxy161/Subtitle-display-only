@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>影院专属字幕机 - 时间轴版</title>
+    <script src="https://unpkg.com/jassub/dist/jassub.js"></script>
+    <style>
+        body { margin: 0; padding: 0; background: #000; color: #aaa; font-family: sans-serif; overflow: hidden; }
+        #app { position: relative; width: 100vw; height: 100vh; display: flex; align-items: center; justify-content: center; }
+        
+        #canvas { position: absolute; width: 100%; height: 100%; pointer-events: none; z-index: 10; transition: filter 0.3s; }
+        #touch-mask { position: absolute; width: 100%; height: 100%; z-index: 20; }
+        
+        #controls {
+            position: absolute; bottom: 0; width: 100%; background: rgba(0, 0, 0, 0.85);
+            padding: 15px; box-sizing: border-box; z-index: 30;
+            display: flex; flex-direction: column; gap: 12px;
+            transition: transform 0.3s ease;
+            user-select: none;
+        }
+        .hidden { transform: translateY(100%); }
+        
+        .row { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+        button, label.btn {
+            background: #222; color: #ccc; border: 1px solid #444; padding: 8px 12px;
+            border-radius: 4px; font-size: 14px; cursor: pointer; text-align: center;
+        }
+        button:active, label.btn:active { background: #444; }
+        input[type="file"] { display: none; }
+        
+        .time-display { font-size: 20px; font-weight: bold; color: #fff; font-variant-numeric: tabular-nums; width: 130px;}
+        
+        /* 时间轴滑块专属样式 */
+        .timeline-container { display: flex; align-items: center; gap: 10px; width: 100%; }
+        #progress-bar { flex-grow: 1; height: 6px; -webkit-appearance: none; background: #444; border-radius: 3px; outline: none; }
+        #progress-bar::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%; background: #fff; cursor: pointer; }
+        
+        .slider-group { display: flex; align-items: center; gap: 5px; font-size: 12px; }
+        input[type=range].mini-slider { width: 80px; }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <canvas id="canvas"></canvas>
+        <div id="touch-mask" onclick="toggleControls()"></div>
+        
+        <div id="controls">
+            <div class="timeline-container">
+                <div class="time-display" id="clock">00:00:00.0</div>
+                <input type="range" id="progress-bar" min="0" max="100" step="0.1" value="0" oninput="seekTime(this.value)">
+                <div class="time-display" id="duration" style="font-size: 14px; width: 60px; text-align: right;">00:00</div>
+            </div>
+
+            <div class="row">
+                <div>
+                    <button onclick="togglePlay()" id="play-btn" style="background: #3a3; color: #fff;">▶ 开始同步</button>
+                    <button onclick="enterCinemaMode()">🎦 全屏横屏</button>
+                </div>
+                <label class="btn"><input type="file" id="ass-file" accept=".ass">📂 导入ASS</label>
+            </div>
+            
+            <div class="row">
+                <div class="slider-group">
+                    <span>偏移:</span>
+                    <button onclick="adjustOffset(-0.5)">-0.5s</button>
+                    <button onclick="adjustOffset(-0.1)">-0.1s</button>
+                    <button onclick="adjustOffset(0.1)">+0.1s</button>
+                    <button onclick="adjustOffset(0.5)">+0.5s</button>
+                    <span id="offset-val" style="width: 40px; text-align: right;">0.0s</span>
+                </div>
+            </div>
+
+            <div class="row">
+                <div class="slider-group">
+                    <span>大小:</span>
+                    <input type="range" class="mini-slider" id="scale" min="0.5" max="3" step="0.1" value="1" oninput="updateScale(this.value)">
+                </div>
+                <div class="slider-group">
+                    <span>亮度:</span>
+                    <input type="range" class="mini-slider" id="brightness" min="0.2" max="1" step="0.1" value="1" oninput="updateColor()">
+                </div>
+                <div class="slider-group">
+                    <span>护眼红:</span>
+                    <input type="range" class="mini-slider" id="red-tint" min="0" max="1" step="0.1" value="0" oninput="updateColor()">
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let jassub = null;
+        let isPlaying = false;
+        let baseTime = 0; 
+        let offset = 0;   
+        let lastRealTime = 0; 
+        let totalDuration = 0;
+        let isDragging = false; // 判断是否正在拖拽进度条
+        let wakeLock = null;
+
+        const canvas = document.getElementById('canvas');
+        const controls = document.getElementById('controls');
+        const clockDisplay = document.getElementById('clock');
+        const durationDisplay = document.getElementById('duration');
+        const progressBar = document.getElementById('progress-bar');
+        const playBtn = document.getElementById('play-btn');
+
+        // 正则提取 ASS 最大时间
+        function parseAssDuration(text) {
+            let max = 0;
+            // 匹配 ASS 格式时间 H:MM:SS.CC
+            const regex = /Dialogue: [^,]*,(\d+):(\d{2}):(\d{2})\.(\d{2})/g;
+            let match;
+            while ((match = regex.exec(text)) !== null) {
+                const secs = parseInt(match[1])*3600 + parseInt(match[2])*60 + parseInt(match[3]) + parseInt(match[4])/100;
+                if (secs > max) max = secs;
+            }
+            return max > 0 ? max : 7200; // 默认给2小时兜底
+        }
+
+        function formatTime(secs, showMs = true) {
+            const h = Math.floor(secs / 3600).toString().padStart(2, '0');
+            const m = Math.floor((secs % 3600) / 60).toString().padStart(2, '0');
+            const s = Math.floor(secs % 60).toString().padStart(2, '0');
+            if (!showMs) return h > 0 ? `${h}:${m}:${s}` : `${m}:${s}`;
+            const ms = Math.floor((secs % 1) * 10).toString();
+            return `${h}:${m}:${s}.${ms}`;
+        }
+
+        // 监听文件导入
+        document.getElementById('ass-file').addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                const assContent = event.target.result;
+                
+                // 解析时间轴总长
+                totalDuration = parseAssDuration(assContent);
+                progressBar.max = totalDuration;
+                durationDisplay.innerText = formatTime(totalDuration, false);
+
+                if (jassub) jassub.destroy();
+                // 强制指定公网 CDN 的 Worker 和 WASM 路径，绕过本地 file:// 协议跨域限制
+                jassub = new JASSUB({
+                    canvas: canvas,
+                    subContent: assContent,
+                    subtitleScale: document.getElementById('scale').value,
+                    workerUrl: 'https://unpkg.com/jassub/dist/jassub.worker.js',
+                    wasmUrl: 'https://unpkg.com/jassub/dist/jassub.wasm'
+                });
+                
+                baseTime = 0;
+                offset = 0;
+                progressBar.value = 0;
+                updateDisplay(0);
+            };
+            reader.readAsText(file);
+        });
+
+        // 时间更新与渲染核心
+        function updateDisplay(renderTime) {
+            if (jassub) jassub.setCurrentTime(Math.max(0, renderTime));
+            clockDisplay.innerText = formatTime(Math.max(0, renderTime));
+            if (!isDragging) progressBar.value = Math.max(0, renderTime);
+        }
+
+        // 核心循环
+        function tick() {
+            if (isPlaying && !isDragging) {
+                const now = performance.now();
+                const delta = (now - lastRealTime) / 1000;
+                baseTime += delta;
+                lastRealTime = now;
+                updateDisplay(baseTime + offset);
+            }
+            requestAnimationFrame(tick);
+        }
+        requestAnimationFrame(tick);
+
+        // 播放暂停
+        function togglePlay() {
+            isPlaying = !isPlaying;
+            if (isPlaying) {
+                lastRealTime = performance.now();
+                playBtn.innerText = '⏸ 暂停';
+                playBtn.style.background = '#aa3333';
+            } else {
+                playBtn.innerText = '▶ 开始同步';
+                playBtn.style.background = '#3a3';
+            }
+        }
+
+        // 拖拽进度条核心逻辑
+        progressBar.addEventListener('mousedown', () => isDragging = true);
+        progressBar.addEventListener('touchstart', () => isDragging = true);
+        
+        function seekTime(val) {
+            const targetTime = parseFloat(val);
+            baseTime = targetTime - offset; // 反推 baseTime，保证 renderTime = targetTime
+            updateDisplay(targetTime);
+        }
+
+        progressBar.addEventListener('mouseup', () => { isDragging = false; lastRealTime = performance.now(); });
+        progressBar.addEventListener('touchend', () => { isDragging = false; lastRealTime = performance.now(); });
+
+        // 偏移调整
+        function adjustOffset(val) {
+            offset += val;
+            document.getElementById('offset-val').innerText = offset.toFixed(1) + 's';
+            updateDisplay(baseTime + offset);
+        }
+
+        // UI视觉控制
+        function updateScale(val) { if (jassub) jassub.setSubtitleScale(parseFloat(val)); }
+        function updateColor() {
+            const brightness = document.getElementById('brightness').value;
+            const red = document.getElementById('red-tint').value;
+            canvas.style.filter = `brightness(${brightness}) sepia(${red}) hue-rotate(-50deg) saturate(${1 + red * 2})`;
+        }
+
+        function toggleControls() { controls.classList.toggle('hidden'); }
+
+        async function enterCinemaMode() {
+            try {
+                if (document.documentElement.requestFullscreen) await document.documentElement.requestFullscreen();
+                if (screen.orientation && screen.orientation.lock) await screen.orientation.lock('landscape');
+                if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen');
+                controls.classList.add('hidden');
+            } catch (err) { console.log('当前环境不支持部分全屏或常亮API'); }
+        }
+    </script>
+</body>
+</html>
